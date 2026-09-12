@@ -1,0 +1,46 @@
+name: Monitor Supreme Court postings
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scotus-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check for new publications
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+          SMS_TO: ${{ secrets.SMS_TO }}
+        run: python scotus_monitor.py
+
+      - name: Save monitor state
+        run: |
+          if [ -z "$(git status --porcelain -- state/seen.json)" ]; then exit 0; fi
+          git config user.name "scotus-monitor[bot]"
+          git config user.email "scotus-monitor[bot]@users.noreply.github.com"
+          git add state/seen.json
+          git commit -m "Update SCOTUS monitor state"
+          git push
