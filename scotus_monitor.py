@@ -184,7 +184,7 @@ def miscellaneous_order_text(url: str) -> str:
         raise RuntimeError(f"Could not locate the date in Miscellaneous Order PDF: {url}")
     body = "\n".join(lines[date_index + 1 :]).strip()
     if not body:
-        raise RuntimeError(f"No text found below the date in Miscellaneous Order PDF: {url}")
+        raise RuntimeError(f"No order body text found in Miscellaneous Order PDF: {url}")
     return body
 
 
@@ -243,7 +243,7 @@ def alert_text(items: list[Item]) -> str:
         if item.justice:
             lines.append(f"Opinion by: {item.justice}")
         if item.document_text:
-            lines.extend(["", "FULL TEXT BELOW THE DATE", item.document_text])
+            lines.extend(["", "FULL ORDER TEXT", item.document_text])
         lines.append(item.url)
     return "\n".join(lines)
 
@@ -267,13 +267,13 @@ def email_html(items: list[Item]) -> str:
         metadata = []
         if item.docket:
             metadata.append(
-                f'<tr><td style="padding:5px 14px 5px 0;color:#667085;">Docket</td>'
-                f'<td style="padding:5px 0;font-weight:600;">{html.escape(item.docket)}</td></tr>'
+                f'<tr><td style="padding:5px 16px 5px 0;color:#687482;">Docket</td>'
+                f'<td style="padding:5px 0;font-weight:600;color:#18222d;">{html.escape(item.docket)}</td></tr>'
             )
         if item.justice:
             metadata.append(
-                f'<tr><td style="padding:5px 14px 5px 0;color:#667085;">Opinion by</td>'
-                f'<td style="padding:5px 0;font-weight:600;">{html.escape(item.justice)}</td></tr>'
+                f'<tr><td style="padding:5px 16px 5px 0;color:#687482;">Opinion by</td>'
+                f'<td style="padding:5px 0;font-weight:600;color:#18222d;">{html.escape(item.justice)}</td></tr>'
             )
         full_text = ""
         if item.document_text:
@@ -283,40 +283,39 @@ def email_html(items: list[Item]) -> str:
                 if paragraph.strip()
             )
             full_text = f'''
-              <div style="margin:24px 0 0;border-top:1px solid #ded8ca;padding-top:20px;">
-                <div style="font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#967322;margin-bottom:14px;">Full text below the date</div>
-                <div style="font-family:Georgia,'Times New Roman',serif;font-size:15px;line-height:1.7;color:#202936;">{paragraphs}</div>
+              <div style="margin:24px 0 0;border-top:1px solid #d9e0e6;padding-top:20px;">
+                <div style="font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#315f82;margin-bottom:14px;">Full Order Text</div>
+                <div style="font-family:Georgia,'Times New Roman',serif;font-size:15px;line-height:1.7;color:#26323d;">{paragraphs}</div>
               </div>'''
         cards.append(f'''
-          <div style="border:1px solid #ded8ca;border-top:3px solid #b18a32;border-radius:6px;padding:24px;margin:0 0 20px;background:#fff;box-shadow:0 2px 8px rgba(15,27,45,.06);">
-            <div style="font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#967322;">
+          <div style="border:1px solid #d9e0e6;border-left:4px solid #315f82;border-radius:6px;padding:24px;margin:0 0 20px;background:#fff;box-shadow:0 3px 12px rgba(20,28,36,.07);">
+            <div style="font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#315f82;">
               {html.escape(item.category)}
             </div>
-            <h2 style="font-family:Georgia,'Times New Roman',serif;font-size:22px;line-height:1.35;margin:9px 0 14px;color:#0f1b2d;">
+            <h2 style="font-family:Georgia,'Times New Roman',serif;font-size:22px;line-height:1.35;margin:9px 0 14px;color:#141a20;">
               {html.escape(item.title)}
             </h2>
-            <table role="presentation" style="font-size:13px;color:#3f4a59;margin-bottom:18px;border-collapse:collapse;">
+            <table role="presentation" style="font-size:13px;color:#44515e;margin-bottom:18px;border-collapse:collapse;">
               {''.join(metadata)}
             </table>
             <a href="{html.escape(item.url, quote=True)}"
-               style="display:inline-block;background:#10233f;color:#fff;text-decoration:none;padding:11px 18px;border-radius:4px;font-size:13px;font-weight:700;letter-spacing:.02em;">
+               style="display:inline-block;background:#202a33;color:#fff;text-decoration:none;padding:11px 18px;border-radius:4px;font-size:13px;font-weight:700;letter-spacing:.02em;">
               View official PDF
             </a>
             {full_text}
           </div>''')
     return f'''<!doctype html>
-<html><body style="margin:0;background:#eeeae1;font-family:Arial,Helvetica,sans-serif;color:#172033;">
+<html><body style="margin:0;background:#edf1f4;font-family:Arial,Helvetica,sans-serif;color:#18222d;">
   <div style="display:none;max-height:0;overflow:hidden;">New publication detected on the official Supreme Court website.</div>
   <div style="max-width:700px;margin:0 auto;padding:34px 14px;">
-    <div style="background:#0b182b;color:#fff;padding:30px 32px 27px;border-bottom:4px solid #b18a32;border-radius:7px 7px 0 0;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#d4ba78;">SCOTUS Wire</div>
+    <div style="background:#171c21;color:#fff;padding:30px 32px 27px;border-bottom:4px solid #315f82;border-radius:7px 7px 0 0;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#8fb4cf;">SCOTUS Wire</div>
       <div style="font-family:Georgia,'Times New Roman',serif;font-size:30px;line-height:1.2;margin-top:8px;">Supreme Court Publication Alert</div>
-      <div style="font-size:13px;color:#cbd2dc;margin-top:9px;">Official document monitoring</div>
     </div>
-    <div style="background:#f8f6f1;padding:30px 28px;border-radius:0 0 7px 7px;">
-      <p style="margin:0 0 24px;font-family:Georgia,'Times New Roman',serif;font-size:16px;line-height:1.6;color:#3e4856;">The Supreme Court has published {len(items)} new item{'s' if len(items) != 1 else ''} on a monitored page.</p>
+    <div style="background:#f7f9fa;padding:30px 28px;border-radius:0 0 7px 7px;">
+      <p style="margin:0 0 24px;font-family:Georgia,'Times New Roman',serif;font-size:16px;line-height:1.6;color:#44515e;">The Supreme Court has published {len(items)} new item{'s' if len(items) != 1 else ''}.</p>
       {''.join(cards)}
-      <p style="font-size:11px;line-height:1.5;color:#7c8490;margin:24px 2px 0;text-align:center;">Automated alert based on the official website of the Supreme Court of the United States.</p>
+      <p style="font-size:11px;line-height:1.5;color:#7b8792;margin:24px 2px 0;text-align:center;">Automated alert based on the official website of the Supreme Court of the United States.</p>
     </div>
   </div>
 </body></html>'''
