@@ -15,19 +15,26 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from html.parser import HTMLParser
 from pathlib import Path
 
 BASE = "https://www.supremecourt.gov"
-DEFAULT_PAGES = {
-    "Opinions": f"{BASE}/opinions/slipopinion/{str(datetime.now().year)[-2:]}",
-    "Orders": f"{BASE}/orders/ordersofthecourt",
-    "Opinions relating to orders": f"{BASE}/opinions/relatingtoorders/{str(datetime.now().year)[-2:]}",
-}
 USER_AGENT = "SCOTUS-Publication-Monitor/1.0 (personal notification tool)"
+JUSTICES = {
+    "PC": "Per Curiam",
+    "R": "Chief Justice Roberts",
+    "T": "Justice Thomas",
+    "A": "Justice Alito",
+    "SS": "Justice Sotomayor",
+    "EK": "Justice Kagan",
+    "NG": "Justice Gorsuch",
+    "BK": "Justice Kavanaugh",
+    "AB": "Justice Barrett",
+}
+DOCKET_RE = re.compile(r"(?:\d{1,3}[A-Z]?[-–]\d+|\d{1,3}O\d+)", re.I)
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,8 @@ class Item:
     title: str
     url: str
     page_url: str
+    docket: str = ""
+    justice: str = ""
 
 
 class PDFLinkParser(HTMLParser):
@@ -45,10 +54,23 @@ class PDFLinkParser(HTMLParser):
         self.category = category
         self._href: str | None = None
         self._text: list[str] = []
+        self._in_row = False
+        self._in_cell = False
+        self._cell_text: list[str] = []
+        self._cells: list[str] = []
+        self._row_links: list[tuple[str, str]] = []
         self.items: list[Item] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "a":
+        tag = tag.lower()
+        if tag == "tr":
+            self._in_row = True
+            self._cells = []
+            self._row_links = []
+        elif tag in {"td", "th"} and self._in_row:
+            self._in_cell = True
+            self._cell_text = []
+        if tag != "a":
             return
         href = dict(attrs).get("href")
         if href and re.search(r"\.pdf(?:$|[?#])", href, re.I):
@@ -56,19 +78,58 @@ class PDFLinkParser(HTMLParser):
             self._text = []
 
     def handle_data(self, data: str) -> None:
-        if self._href:
+        if self._in_cell:
+            self._cell_text.append(data)
+        if self._href is not None:
             self._text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "a" or not self._href:
-            return
-        url = urllib.parse.urljoin(self.page_url, self._href)
-        title = " ".join(" ".join(self._text).split())
-        if not title:
-            title = Path(urllib.parse.urlparse(url).path).name
-        self.items.append(Item(self.category, title, url, self.page_url))
-        self._href = None
-        self._text = []
+        tag = tag.lower()
+        if tag in {"td", "th"} and self._in_cell:
+            self._cells.append(" ".join(" ".join(self._cell_text).split()))
+            self._in_cell = False
+            self._cell_text = []
+        elif tag == "a" and self._href is not None:
+            link_text = " ".join(" ".join(self._text).split())
+            if self._in_row:
+                self._row_links.append((self._href, link_text))
+            else:
+                self.items.append(self._make_item(self._href, link_text, []))
+            self._href = None
+            self._text = []
+        elif tag == "tr" and self._in_row:
+            for href, link_text in self._row_links:
+                self.items.append(self._make_item(href, link_text, self._cells))
+            self._in_row = False
+            self._cells = []
+            self._row_links = []
+
+    def _make_item(self, href: str, link_text: str, cells: list[str]) -> Item:
+        url = urllib.parse.urljoin(self.page_url, href)
+        docket = ""
+        docket_index: int | None = None
+        for index, cell in enumerate(cells):
+            match = DOCKET_RE.search(cell)
+            if match:
+                docket = match.group(0).replace("–", "-")
+                docket_index = index
+                break
+
+        justice = ""
+        for cell in cells:
+            code = cell.strip().upper().rstrip(".")
+            if code in JUSTICES:
+                justice = JUSTICES[code]
+                break
+
+        title = link_text
+        if docket_index is not None and docket_index + 1 < len(cells):
+            candidate = cells[docket_index + 1]
+            if candidate and candidate.upper().rstrip(".") not in JUSTICES:
+                title = candidate
+        if not title or (docket and title == docket):
+            title = docket or Path(urllib.parse.urlparse(url).path).name
+        return Item(self.category, title, url, self.page_url, docket, justice)
 
 
 def term_year() -> str:
@@ -135,10 +196,74 @@ def save_state(path: Path, seen: set[str]) -> None:
 
 
 def alert_text(items: list[Item]) -> str:
-    lines = [f"SCOTUS posted {len(items)} new item{'s' if len(items) != 1 else ''}:"]
+    lines = [f"SUPREME COURT PUBLICATION ALERT\n{len(items)} new item{'s' if len(items) != 1 else ''}"]
     for item in items:
-        lines.extend([f"\n[{item.category}] {item.title}", item.url])
+        lines.append(f"\n{item.category.upper()}\n{item.title}")
+        if item.docket:
+            lines.append(f"Docket: {item.docket}")
+        if item.justice:
+            lines.append(f"Opinion by: {item.justice}")
+        lines.append(item.url)
     return "\n".join(lines)
+
+
+def email_subject(items: list[Item]) -> str:
+    if len(items) != 1:
+        return f"SCOTUS Alert | {len(items)} New Publications"
+    item = items[0]
+    labels = {
+        "Opinions": "New Opinion of the Court",
+        "Orders": "New Order",
+        "Opinions relating to orders": "New Opinion Relating to Orders",
+    }
+    suffix = f" | {item.docket}" if item.docket else ""
+    return f"SCOTUS Alert | {labels.get(item.category, 'New Publication')}{suffix}"
+
+
+def email_html(items: list[Item]) -> str:
+    cards = []
+    for item in items:
+        metadata = []
+        if item.docket:
+            metadata.append(
+                f'<tr><td style="padding:5px 14px 5px 0;color:#667085;">Docket</td>'
+                f'<td style="padding:5px 0;font-weight:600;">{html.escape(item.docket)}</td></tr>'
+            )
+        if item.justice:
+            metadata.append(
+                f'<tr><td style="padding:5px 14px 5px 0;color:#667085;">Opinion by</td>'
+                f'<td style="padding:5px 0;font-weight:600;">{html.escape(item.justice)}</td></tr>'
+            )
+        cards.append(f'''
+          <div style="border:1px solid #d0d5dd;border-radius:8px;padding:22px;margin:0 0 18px;">
+            <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6941c6;">
+              {html.escape(item.category)}
+            </div>
+            <h2 style="font-family:Georgia,serif;font-size:21px;line-height:1.35;margin:8px 0 12px;color:#101828;">
+              {html.escape(item.title)}
+            </h2>
+            <table role="presentation" style="font-size:14px;color:#344054;margin-bottom:16px;">
+              {''.join(metadata)}
+            </table>
+            <a href="{html.escape(item.url, quote=True)}"
+               style="display:inline-block;background:#1d2939;color:#fff;text-decoration:none;padding:10px 16px;border-radius:5px;font-weight:700;">
+              View official PDF
+            </a>
+          </div>''')
+    return f'''<!doctype html>
+<html><body style="margin:0;background:#f2f4f7;font-family:Arial,sans-serif;color:#101828;">
+  <div style="max-width:680px;margin:0 auto;padding:28px 14px;">
+    <div style="background:#101828;color:#fff;padding:24px 28px;border-radius:8px 8px 0 0;">
+      <div style="font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#d0d5dd;">SCOTUS Wire</div>
+      <div style="font-family:Georgia,serif;font-size:28px;margin-top:5px;">Supreme Court Publication Alert</div>
+    </div>
+    <div style="background:#fff;padding:28px;border-radius:0 0 8px 8px;">
+      <p style="margin:0 0 22px;color:#475467;">The Supreme Court has published {len(items)} new item{'s' if len(items) != 1 else ''} on a monitored page.</p>
+      {''.join(cards)}
+      <p style="font-size:12px;color:#98a2b3;margin:22px 0 0;">Automated alert based on the official Supreme Court website.</p>
+    </div>
+  </div>
+</body></html>'''
 
 
 def send_email(items: list[Item]) -> None:
@@ -147,16 +272,11 @@ def send_email(items: list[Item]) -> None:
         return
     sender = os.getenv("EMAIL_FROM", os.environ["SMTP_USERNAME"])
     msg = EmailMessage()
-    msg["Subject"] = f"SCOTUS alert: {len(items)} new posting{'s' if len(items) != 1 else ''}"
+    msg["Subject"] = email_subject(items)
     msg["From"] = sender
     msg["To"] = os.environ["EMAIL_TO"]
     msg.set_content(alert_text(items))
-    rows = "".join(
-        f'<li><strong>{html.escape(i.category)}:</strong> '
-        f'<a href="{html.escape(i.url, quote=True)}">{html.escape(i.title)}</a></li>'
-        for i in items
-    )
-    msg.add_alternative(f"<p>New Supreme Court posting(s):</p><ul>{rows}</ul>", subtype="html")
+    msg.add_alternative(email_html(items), subtype="html")
     port = int(os.getenv("SMTP_PORT", "465"))
     context = ssl.create_default_context()
     with smtplib.SMTP_SSL(os.environ["SMTP_HOST"], port, context=context) as server:
@@ -222,7 +342,11 @@ def main() -> int:
         # Only mark items seen after every configured channel succeeds.
         send_email(new_items)
         send_sms(new_items)
-    save_state(args.state, old_seen | {item.url for item in all_items})
+    updated_seen = old_seen | {item.url for item in all_items}
+    # Avoid a repository commit on every scheduled check. Persist only the
+    # initial baseline or a genuinely new PDF URL.
+    if first_run or updated_seen != old_seen:
+        save_state(args.state, updated_seen)
     if first_run and not args.notify_initial:
         print("Baseline created; alerts begin with the next new posting.")
     return 0
