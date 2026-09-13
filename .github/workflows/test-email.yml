@@ -13,7 +13,7 @@ jobs:
           python-version: "3.12"
       - name: Install PDF text extractor
         run: python -m pip install --disable-pip-version-check pypdf==6.1.1
-      - name: Send latest Supreme Court PDFs
+      - name: Send fifth most recent Supreme Court order
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -25,13 +25,11 @@ jobs:
           python - <<'PY'
           from scotus_monitor import fetch, monitored_pages, parse_items, send_email
 
-          latest_items = []
-          for category, page_url in monitored_pages().items():
-              items = parse_items(fetch(page_url), page_url, category)
-              if len(items) < 3:
-                  raise RuntimeError(f"Fewer than three PDFs found on the {category} page")
-              latest_items.extend(items[:3])
+          page_url = monitored_pages()["Orders"]
+          items = parse_items(fetch(page_url), page_url, "Orders")
+          if len(items) < 5:
+              raise RuntimeError("Fewer than five PDFs found on the Orders page")
 
-          send_email(latest_items)
-          print("Sent the three latest PDFs from each monitored page.")
+          send_email([items[4]])
+          print("Sent the fifth most recent PDF from the Orders page.")
           PY
