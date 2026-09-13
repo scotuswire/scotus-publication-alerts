@@ -8,7 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install PDF text extractor
+        run: python -m pip install --disable-pip-version-check pypdf==6.1.1
       - name: Send latest Supreme Court PDFs
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -22,13 +26,10 @@ jobs:
           from scotus_monitor import fetch, monitored_pages, parse_items, send_email
 
           latest_items = []
-
           for category, page_url in monitored_pages().items():
               items = parse_items(fetch(page_url), page_url, category)
-
               if not items:
                   raise RuntimeError(f"No PDFs found on the {category} page")
-
               latest_items.append(items[0])
 
           send_email(latest_items)
