@@ -28,10 +28,10 @@ jobs:
           latest_items = []
           for category, page_url in monitored_pages().items():
               items = parse_items(fetch(page_url), page_url, category)
-              if not items:
-                  raise RuntimeError(f"No PDFs found on the {category} page")
-              latest_items.append(items[0])
+              if len(items) < 3:
+                  raise RuntimeError(f"Fewer than three PDFs found on the {category} page")
+              latest_items.extend(items[:3])
 
           send_email(latest_items)
-          print("Sent the latest PDF from each monitored page.")
+          print("Sent the three latest PDFs from each monitored page.")
           PY
