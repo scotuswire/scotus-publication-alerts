@@ -9,7 +9,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Send test alert
+      - name: Send latest Supreme Court PDFs
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -19,15 +19,18 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
           python - <<'PY'
-          from scotus_monitor import Item, send_email
+          from scotus_monitor import fetch, monitored_pages, parse_items, send_email
 
-          send_email([
-              Item(
-                  category="Test",
-                  title="SCOTUS publication monitor test",
-                  url="https://www.supremecourt.gov/",
-                  page_url="https://www.supremecourt.gov/",
-              )
-          ])
-          print("Test email sent successfully.")
+          latest_items = []
+
+          for category, page_url in monitored_pages().items():
+              items = parse_items(fetch(page_url), page_url, category)
+
+              if not items:
+                  raise RuntimeError(f"No PDFs found on the {category} page")
+
+              latest_items.append(items[0])
+
+          send_email(latest_items)
+          print("Sent the latest PDF from each monitored page.")
           PY
