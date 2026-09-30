@@ -13,7 +13,7 @@ jobs:
           python-version: "3.12"
       - name: Install PDF text extractor
         run: python -m pip install --disable-pip-version-check pypdf==6.1.1
-      - name: Send fifth most recent Supreme Court order
+      - name: Verify term rollover and send newest Miscellaneous Order
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -23,13 +23,27 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
           python - <<'PY'
-          from scotus_monitor import fetch, monitored_pages, parse_items, send_email
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          from scotus_monitor import fetch, monitored_pages, parse_items, send_email, term_year
+
+          eastern = ZoneInfo("America/New_York")
+          before_rollover = datetime(2026, 9, 30, 23, 59, tzinfo=eastern)
+          after_rollover = datetime(2026, 10, 1, 0, 0, tzinfo=eastern)
+          assert term_year(before_rollover) == "25", "September 30 should use OT25"
+          assert term_year(after_rollover) == "26", "October 1 should use OT26"
+          print("Term rollover test passed: OT25 becomes OT26 at midnight Eastern.")
 
           page_url = monitored_pages()["Orders"]
           items = parse_items(fetch(page_url), page_url, "Orders")
-          if len(items) < 5:
-              raise RuntimeError("Fewer than five PDFs found on the Orders page")
+          miscellaneous_orders = [
+              item for item in items
+              if "miscellaneous order" in item.title.lower()
+          ]
+          if not miscellaneous_orders:
+              raise RuntimeError("No Miscellaneous Order found on the Orders page")
 
-          send_email([items[4]])
-          print("Sent the fifth most recent PDF from the Orders page.")
+          send_email([miscellaneous_orders[0]])
+          print("Sent the newest Miscellaneous Order using full-text extraction.")
           PY
