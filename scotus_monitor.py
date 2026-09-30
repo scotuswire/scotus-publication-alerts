@@ -16,7 +16,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from html.parser import HTMLParser
@@ -36,6 +36,7 @@ JUSTICES = {
     "AB": "Justice Barrett",
 }
 DOCKET_RE = re.compile(r"(?:\d{1,3}[A-Z]?[-–]\d+|\d{1,3}O\d+)", re.I)
+TABLE_DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/(?:\d{2}|\d{4}))\b")
 DATE_LINE_RE = re.compile(
     r"^(?:MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY),\s+"
     r"(?:JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+"
@@ -52,6 +53,7 @@ class Item:
     page_url: str
     docket: str = ""
     justice: str = ""
+    publication_date: str = ""
     document_text: str = ""
 
 
@@ -113,7 +115,8 @@ class PDFLinkParser(HTMLParser):
             self._row_links = []
 
     def _make_item(self, href: str, link_text: str, cells: list[str]) -> Item:
-        url = urllib.parse.urljoin(self.page_url, href)
+        # Page fragments point into the same PDF and must not create a second alert.
+        url = urllib.parse.urldefrag(urllib.parse.urljoin(self.page_url, href))[0]
         docket = ""
         docket_index: int | None = None
         for index, cell in enumerate(cells):
@@ -130,6 +133,29 @@ class PDFLinkParser(HTMLParser):
                 justice = JUSTICES[code]
                 break
 
+        publication_date = ""
+        for cell in cells:
+            match = TABLE_DATE_RE.search(cell)
+            if not match:
+                continue
+            raw_date = match.group(1)
+            for date_format in ("%m/%d/%y", "%m/%d/%Y"):
+                try:
+                    publication_date = datetime.strptime(raw_date, date_format).date().isoformat()
+                    break
+                except ValueError:
+                    pass
+            if publication_date:
+                break
+        if not publication_date and self.category == "Orders":
+            filename = Path(urllib.parse.urlparse(url).path).name
+            filename_date = re.match(r"(\d{6})", filename)
+            if filename_date:
+                try:
+                    publication_date = datetime.strptime(filename_date.group(1), "%m%d%y").date().isoformat()
+                except ValueError:
+                    pass
+
         title = link_text
         if docket_index is not None and docket_index + 1 < len(cells):
             candidate = cells[docket_index + 1]
@@ -137,7 +163,7 @@ class PDFLinkParser(HTMLParser):
                 title = candidate
         if not title or (docket and title == docket):
             title = docket or Path(urllib.parse.urlparse(url).path).name
-        return Item(self.category, title, url, self.page_url, docket, justice)
+        return Item(self.category, title, url, self.page_url, docket, justice, publication_date)
 
 
 def term_year() -> str:
@@ -192,6 +218,15 @@ def enrich_for_email(item: Item) -> Item:
     if item.category == "Orders" and "miscellaneous order" in item.title.lower():
         return replace(item, document_text=miscellaneous_order_text(item.url))
     return item
+
+
+def is_recent_publication(item: Item, days: int = 7) -> bool:
+    """Reject archival backfills while allowing modestly delayed postings."""
+    if not item.publication_date:
+        return False
+    published = datetime.strptime(item.publication_date, "%Y-%m-%d").date()
+    age = (datetime.now().date() - published).days
+    return 0 <= age <= days
 
 
 def parse_items(page_html: str, page_url: str, category: str) -> list[Item]:
@@ -367,7 +402,31 @@ def main() -> int:
     parser.add_argument("--state", type=Path, default=Path("state/seen.json"))
     parser.add_argument("--notify-initial", action="store_true", help="alert for existing items on first run")
     parser.add_argument("--dry-run", action="store_true", help="print findings without alerts or state changes")
+    parser.add_argument(
+        "--prepare-alert",
+        type=Path,
+        help="save state and write pending alerts here without sending them",
+    )
+    parser.add_argument(
+        "--send-prepared",
+        type=Path,
+        help="send alerts previously written by --prepare-alert",
+    )
     args = parser.parse_args()
+
+    if args.send_prepared:
+        try:
+            payload = json.loads(args.send_prepared.read_text(encoding="utf-8"))
+            items = [Item(**entry) for entry in payload]
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            raise RuntimeError(f"Could not read prepared alert {args.send_prepared}: {exc}") from exc
+        if not items:
+            print("No prepared Supreme Court alerts to send.")
+            return 0
+        send_email(items)
+        send_sms(items)
+        print(f"Sent {len(items)} prepared Supreme Court alert item(s).")
+        return 0
 
     state = load_state(args.state)
     first_run = not args.state.exists()
@@ -388,21 +447,32 @@ def main() -> int:
         print("No PDF links found; refusing to overwrite state.", file=sys.stderr)
         return 1
 
-    new_items = [item for item in all_items if item.url not in old_seen]
+    newly_seen_items = [item for item in all_items if item.url not in old_seen]
+    new_items = [item for item in newly_seen_items if is_recent_publication(item)]
+    suppressed = len(newly_seen_items) - len(new_items)
     should_alert = bool(new_items) and (not first_run or args.notify_initial)
     print(alert_text(new_items) if new_items else "No new Supreme Court postings.")
+    if suppressed:
+        print(f"Recorded {suppressed} archival or undated PDF(s) without alerting.")
 
     if args.dry_run:
         return 0
-    if should_alert:
-        # Only mark items seen after every configured channel succeeds.
-        send_email(new_items)
-        send_sms(new_items)
     updated_seen = old_seen | {item.url for item in all_items}
     # Avoid a repository commit on every scheduled check. Persist only the
     # initial baseline or a genuinely new PDF URL.
     if first_run or updated_seen != old_seen:
         save_state(args.state, updated_seen)
+    if args.prepare_alert:
+        args.prepare_alert.parent.mkdir(parents=True, exist_ok=True)
+        prepared_items = new_items if should_alert else []
+        args.prepare_alert.write_text(
+            json.dumps([asdict(item) for item in prepared_items], indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Prepared {len(prepared_items)} alert item(s); no email sent yet.")
+    elif should_alert:
+        send_email(new_items)
+        send_sms(new_items)
     if first_run and not args.notify_initial:
         print("Baseline created; alerts begin with the next new posting.")
     return 0
